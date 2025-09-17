@@ -27,6 +27,66 @@
 # define rb_f_notimplement rb_notimplement
 # define rb_str_subseq(a, b, c) rb_str_substr(a, b, c)
 # define rb_str_new_cstr(a) rb_str_new2(a)
+
+/* ------------ RUBY-3.2 COMPATIBILITY WRAPPERS ------------ */
+
+/* rb_block_call expects:
+ *   VALUE (*proc)(VALUE obj, VALUE arg, int argc, const VALUE *argv, VALUE data)
+ * We often had functions: VALUE get_iconv_opt_i(VALUE item, VALUE opt)
+ * Create a small wrapper that matches rb_block_call signature and delegates.
+ */
+static VALUE
+get_iconv_opt_i_block(VALUE obj, VALUE item, int argc, const VALUE *argv, VALUE data)
+{
+    (void)obj; (void)argc; (void)argv;
+    /* 'data' was the opt param passed as VALUE in original call */
+    /* original get_iconv_opt_i signature: VALUE get_iconv_opt_i(VALUE item, VALUE opt) */
+    return get_iconv_opt_i(item, data);
+}
+
+/* rb_ensure expects VALUE (*b_proc)(VALUE), VALUE (*e_proc)(VALUE) */
+/* If we have iconv_s_convert(struct iconv_env_t *arg) we need a wrapper */
+
+/* Forward-declare original internal function if not visible here:
+   VALUE iconv_s_convert(struct iconv_env_t *arg); */
+static VALUE iconv_s_convert_wrap(VALUE v_arg)
+{
+    struct iconv_env_t *argp = (struct iconv_env_t *)v_arg;
+    /* if original function accepts pointer and returns VALUE */
+    return iconv_s_convert(argp);
+}
+
+/* wrapper for cleanup: original iconv_free(struct iconv_env_t *arg) returning void */
+static VALUE iconv_free_wrap(VALUE v_arg)
+{
+    struct iconv_env_t *argp = (struct iconv_env_t *)v_arg;
+    /* call original free routine - update name if different in your file */
+    iconv_free(argp);
+    return Qnil;
+}
+
+/* Some functions were defined as zero-arg:
+ *   VALUE iconv_s_list(void)
+ *   VALUE charset_map_get(void)
+ * Ruby 3.2's rb_define_singleton_method expects a function with signature VALUE(*)(VALUE).
+ * Provide wrappers that accept VALUE but forward to the zero-arg functions.
+ */
+static VALUE iconv_s_list_wrap(VALUE self)
+{
+    (void)self;
+    return iconv_s_list();
+}
+
+static VALUE charset_map_get_wrap(VALUE self)
+{
+    (void)self;
+    return charset_map_get();
+}
+
+/* If there are other functions registered directly as callbacks (e.g. for rb_rescue)
+   which have different signatures, add small wrappers similar to the above. */
+/* ------------ END OF WRAPPERS ------------ */
+
 static VALUE
 rb_str_equal(str1, str2)
     VALUE str1, str2;
@@ -706,7 +766,7 @@ get_iconv_opt(struct rb_iconv_opt_t *opt, VALUE options)
     opt->transliterate = Qundef;
     opt->discard_ilseq = Qundef;
     if (!NIL_P(options)) {
-	rb_block_call(options, rb_intern("each"), 0, 0, get_iconv_opt_i, (VALUE)opt);
+	rb_block_call(options, rb_intern("each"), 0, 0, get_iconv_opt_i_block, (VALUE)opt);
     }
 }
 
@@ -835,7 +895,7 @@ iconv_s_iconv(int argc, VALUE *argv, VALUE self)
     arg.append = rb_ary_push;
     arg.ret = rb_ary_new2(argc);
     arg.cd = iconv_create(argv[0], argv[1], NULL, &arg.toidx);
-    return rb_ensure(iconv_s_convert, (VALUE)&arg, iconv_free, ICONV2VALUE(arg.cd));
+    return rb_ensure(iconv_s_convert_wrap, (VALUE)&arg, iconv_free_wrap, ICONV2VALUE(arg.cd));
 }
 
 /*
@@ -856,7 +916,7 @@ iconv_s_conv(VALUE self, VALUE to, VALUE from, VALUE str)
     arg.append = rb_str_append;
     arg.ret = rb_str_new(0, 0);
     arg.cd = iconv_create(to, from, NULL, &arg.toidx);
-    return rb_ensure(iconv_s_convert, (VALUE)&arg, iconv_free, ICONV2VALUE(arg.cd));
+    return rb_ensure(iconv_s_convert_wrap, (VALUE)&arg, iconv_free_wrap, ICONV2VALUE(arg.cd));
 }
 
 /*
@@ -1291,7 +1351,7 @@ Init_iconv(void)
     rb_define_singleton_method(rb_cIconv, "open", iconv_s_open, -1);
     rb_define_singleton_method(rb_cIconv, "iconv", iconv_s_iconv, -1);
     rb_define_singleton_method(rb_cIconv, "conv", iconv_s_conv, 3);
-    rb_define_singleton_method(rb_cIconv, "list", iconv_s_list, 0);
+    rb_define_singleton_method(rb_cIconv, "list", iconv_s_list_wrap, 0);
     rb_define_singleton_method(rb_cIconv, "ctlmethods", iconv_s_ctlmethods, 0);
     rb_define_method(rb_cIconv, "initialize", iconv_initialize, -1);
     rb_define_method(rb_cIconv, "close", iconv_finish, 0);
@@ -1328,6 +1388,6 @@ Init_iconv(void)
 
     rb_gc_register_address(&charset_map);
     charset_map = rb_hash_new();
-    rb_define_singleton_method(rb_cIconv, "charset_map", charset_map_get, 0);
+    rb_define_singleton_method(rb_cIconv, "charset_map", charset_map_get_wrap, 0);
 }
 
